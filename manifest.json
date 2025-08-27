@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Volume \u2014 Master Gain (Firefox)",
+  "version": "1.3.0",
+  "description": "Sets a per-tab master GainNode for WebAudio at document_start, and pre-attenuates <audio>/<video> (incl. iframes). Debug overlay & popup controls.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tab Volume"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "all_frames": true,
+      "match_about_blank": true,
+      "run_at": "document_start",
+      "js": [
+        "content.js"
+      ]
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "tab-volume@yourdomain",
+      "strict_min_version": "109.0"
+    }
+  }
+}
