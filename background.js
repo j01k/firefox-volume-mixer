@@ -1,106 +1,117 @@
 // Firefox MV3 event background (no modules)
-const DEFAULT_GLOBAL_VOLUME = 0.20; // 20%
-const tabVolumes = new Map(); // tabId -> 0..1
+const DEFAULT_GLOBAL_VOLUME = 0.20;
 
-// In-memory ring buffers
-const RECENT_ERRORS = [];
-const RECENT_INFO = [];
-function pushBuf(buf, obj, cap=500){ buf.push(obj); if (buf.length > cap) buf.shift(); }
-function logError(where, err){ pushBuf(RECENT_ERRORS, { ts: Date.now(), where, msg: String(err && err.message || err) }); }
-function logInfo(where, msg){ pushBuf(RECENT_INFO, { ts: Date.now(), where, msg: String(msg) }); }
+// Persistent map: { origin: 0..1 }
+let volumesByOrigin = {}; // cached mirror of storage.local
 
-function clamp(n){ return Math.max(0, Math.min(1, Number(n)||0)); }
-async function getGlobalDefault(){
-  const { globalDefaultVolume } = await browser.storage.local.get("globalDefaultVolume");
-  return typeof globalDefaultVolume === "number" ? clamp(globalDefaultVolume) : DEFAULT_GLOBAL_VOLUME;
+const clamp = n => Math.max(0, Math.min(1, Number(n) || 0));
+const getOrigin = (url) => { try { return new URL(url).origin; } catch { return null; } };
+
+async function loadVolumes() {
+  const { volumesByOrigin: stored = {} } = await browser.storage.local.get("volumesByOrigin");
+  volumesByOrigin = stored;
 }
-async function setGlobalDefault(vol){ await browser.storage.local.set({ globalDefaultVolume: clamp(vol) }); }
-async function getTabVolume(tabId){
-  return tabVolumes.has(tabId) ? tabVolumes.get(tabId) : (await getGlobalDefault());
+async function saveVolumes() {
+  await browser.storage.local.set({ volumesByOrigin });
 }
-async function setTabVolume(tabId, vol){
+
+// Helper: apply to a specific tab (no save)
+async function pushVolumeToTab(tabId, vol) {
   const v = clamp(vol);
-  tabVolumes.set(tabId, v);
-  setBadge(tabId, v, "#666");
-  try { await browser.tabs.sendMessage(tabId, { type: "SET_VOLUME", volume: v }); } catch (e) {}
+  try {
+    await browser.tabs.sendMessage(tabId, { type: "SET_VOLUME", volume: v });
+    await browser.action.setBadgeText({ tabId, text: String(Math.round(v * 100)) });
+    await browser.action.setBadgeBackgroundColor({ tabId, color: "#666" });
+  } catch {
+    // unreachable content (blocked page); show "!"
+    await browser.action.setBadgeText({ tabId, text: "!" });
+    await browser.action.setBadgeBackgroundColor({ tabId, color: "#c23" });
+  }
 }
-browser.tabs.onRemoved.addListener(tabId => tabVolumes.delete(tabId));
 
-function setBadge(tabId, v01, color){
-  const text = v01 == null ? "!" : String(Math.round(v01*100));
-  try { browser.action.setBadgeText({ tabId, text }); } catch(e){}
-  try { browser.action.setBadgeBackgroundColor({ tabId, color }); } catch(e){}
+// Helper: apply to all tabs of an origin (no save)
+async function broadcastToOrigin(origin, vol) {
+  const tabs = await browser.tabs.query({});
+  await Promise.all(tabs.map(async (t) => {
+    if (getOrigin(t.url) === origin) await pushVolumeToTab(t.id, vol);
+  }));
 }
 
-// Ping content early and mark unreachable tabs with red "!"
+// On navigation, push the stored per-origin volume (top frame only)
 browser.webNavigation.onCommitted.addListener(async ({ tabId, frameId, url }) => {
   if (frameId !== 0) return;
-  const v = await getTabVolume(tabId);
-  try {
-    await browser.tabs.sendMessage(tabId, { type: "HEALTH_PING" });
-    setBadge(tabId, v, "#666");
-    logInfo("onCommitted", `OK ${url}`);
-  } catch {
-    setBadge(tabId, null, "#c23");
-    logInfo("onCommitted", `FAIL ${url}`);
-  }
+  await loadVolumes();
+  const origin = getOrigin(url);
+  const v = (origin && typeof volumesByOrigin[origin] === "number")
+    ? clamp(volumesByOrigin[origin])
+    : DEFAULT_GLOBAL_VOLUME;
+  await pushVolumeToTab(tabId, v);
 });
 
-browser.tabs.onUpdated.addListener(async (tabId, info) => {
+// Also set a sensible badge right when a tab starts loading
+browser.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   if (info.status === "loading") {
-    const v = await getTabVolume(tabId);
-    try { await browser.tabs.sendMessage(tabId, { type: "SET_VOLUME", volume: v }); } catch(e){}
-    setBadge(tabId, v, "#666");
+    await loadVolumes();
+    const origin = getOrigin(tab.url);
+    const v = (origin && typeof volumesByOrigin[origin] === "number")
+      ? clamp(volumesByOrigin[origin])
+      : DEFAULT_GLOBAL_VOLUME;
+    try {
+      await browser.action.setBadgeText({ tabId, text: String(Math.round(v * 100)) });
+      await browser.action.setBadgeBackgroundColor({ tabId, color: "#666" });
+    } catch {}
   }
 });
 
+// Messages from popup/content
 browser.runtime.onMessage.addListener(async (msg, sender) => {
-  try {
+  if (!msg || !msg.type) return;
+
+  if (msg.type === "HEALTH_PING") return { ok: true };
+
+  if (msg.type === "GET_ORIGIN_VOLUME") {
+    await loadVolumes();
+    const origin = getOrigin(msg.url || (await browser.tabs.get(sender?.tab?.id)).url);
+    const v = (origin && typeof volumesByOrigin[origin] === "number")
+      ? clamp(volumesByOrigin[origin])
+      : DEFAULT_GLOBAL_VOLUME;
+    return { origin, volume: v };
+  }
+
+  if (msg.type === "SET_ORIGIN_VOLUME") {
+    const { origin, volume } = msg;
+    if (!origin || typeof volume !== "number") return { error: "bad args" };
+    await loadVolumes();
+    volumesByOrigin[origin] = clamp(volume);
+    await saveVolumes();
+    await broadcastToOrigin(origin, volumesByOrigin[origin]);
+    return { ok: true };
+  }
+
+  // Back-compat: set for the sender tab's origin
+  if (msg.type === "SET_TAB_VOLUME") {
     const tabId = sender?.tab?.id;
-
-    if (msg?.type === "GET_VOLUME") {
-      return { volume: await getTabVolume(tabId) };
-    }
-    if (msg?.type === "REPORT_NEEDS_VOLUME") {
-      const v = await getTabVolume(tabId);
-      setBadge(tabId, v, "#666");
-      return { volume: v };
-    }
-    if (msg?.type === "SET_TAB_VOLUME") {
-      await setTabVolume(tabId, msg.volume);
+    if (!tabId) return { error: "no tab" };
+    const tab = await browser.tabs.get(tabId);
+    const origin = getOrigin(tab.url);
+    if (origin) {
+      volumesByOrigin[origin] = clamp(msg.volume);
+      await saveVolumes();
+      await broadcastToOrigin(origin, volumesByOrigin[origin]);
       return { ok: true };
     }
-    if (msg?.type === "SET_GLOBAL_DEFAULT") {
-      await setGlobalDefault(msg.volume); return { ok: true };
-    }
-    if (msg?.type === "SET_DEBUG_SETTINGS") {
-      const { debugEnabled, overlayEnabled } = msg;
-      await browser.storage.local.set({ debugEnabled: !!debugEnabled, overlayEnabled: !!overlayEnabled });
-      if (typeof tabId === "number") {
-        try { await browser.tabs.sendMessage(tabId, { type: "DEBUG_SETTINGS", debugEnabled, overlayEnabled }); } catch(e){}
-      }
-      return { ok: true };
-    }
-    if (msg?.type === "GET_DEBUG_SETTINGS") {
-      const { debugEnabled = false, overlayEnabled = true } = await browser.storage.local.get(["debugEnabled","overlayEnabled"]);
-      return { debugEnabled, overlayEnabled };
-    }
-    if (msg?.type === "HEALTH_PING") { return { ok: true }; }
+    return { error: "no origin" };
+  }
 
-    if (msg?.type === "HEARTBEAT") {
-      logInfo(`heartbeat tab:${tabId}`, msg.note || "tick"); return { ok: true };
-    }
-    if (msg?.type === "REPORT_ERROR") {
-      logError(msg.where || `content[${sender?.frameId}]`, msg.error || "unknown"); return { ok: true };
-    }
-    if (msg?.type === "REPORT_INFO") {
-      logInfo(msg.where || `content[${sender?.frameId}]`, msg.info || ""); return { ok: true };
-    }
-    if (msg?.type === "GET_RECENT_ERRORS") {
-      return { errors: RECENT_ERRORS.slice(-200), infos: RECENT_INFO.slice(-200) };
-    }
-  } catch (e) {
-    logError("background.onMessage", e);
-    return { error: String(e?.message || e) };
+  if (msg.type === "REPORT_NEEDS_VOLUME") {
+    await loadVolumes();
+    const tabId = sender?.tab?.id;
+    if (!tabId) return { volume: DEFAULT_GLOBAL_VOLUME };
+    const tab = await browser.tabs.get(tabId);
+    const origin = getOrigin(tab.url);
+    const v = (origin && typeof volumesByOrigin[origin] === "number")
+      ? clamp(volumesByOrigin[origin])
+      : DEFAULT_GLOBAL_VOLUME;
+    return { volume: v };
   }
 });

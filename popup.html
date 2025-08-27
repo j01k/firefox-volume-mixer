@@ -7,23 +7,13 @@
   </head>
   <body>
     <div class="row">
-      <label for="vol">Volume: <span id="volLabel">20%</span></label>
+      <label for="vol">Volume for this site: <span id="volLabel">—</span></label>
       <input id="vol" type="range" min="0" max="100" value="20" />
-    </div>
-
-    <div class="row small">
-      <label class="chk"><input id="overlay" type="checkbox" checked /> Show on-page slider</label>
-      <label class="chk"><input id="debug" type="checkbox" /> Enable debug logs</label>
-    </div>
-
-    <div class="row">
-      <button id="mute">Mute Tab</button>
-      <button id="unmute">Unmute Tab</button>
     </div>
 
     <div class="row small status">
       <div>Health: <span id="health">—</span></div>
-      <div>Badge shows per-tab % or “!” if blocked.</div>
+      <div class="hint">Saved per site (origin). Applies to new tabs here.</div>
     </div>
 
     <script src="popup.js"></script>
