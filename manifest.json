@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Tab Volume — Master Gain (Firefox)",
-  "version": "1.4.0",
+  "name": "Tab Volume — Master Gain Mixer",
+  "version": "1.0.0",
   "description": "Per-origin volume control: WebAudio master gain and HTML media at document_start (all frames).",
   "permissions": ["tabs", "storage", "webNavigation"],
   "host_permissions": ["<all_urls>"],
